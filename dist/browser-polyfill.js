@@ -1275,16 +1275,17 @@
   globalThis.chrome = window.browser || window.chrome || {}
 
   class NativeSendObject {
-    constructor(callback, params) {
+    constructor(callback, params, cmd) {
       this.sendArgus = params;
       this.key = md5(params.toString()+Date.now().toString());
       this.callback = callback
+      this.cmd = cmd || "NativeRuntimeMsgSend"
       this.promiseResolve()
     }
 
     promiseResolve(){
       if( window.webkit && window.webkit.messageHandlers ){
-        window.webkit.messageHandlers.toNative.postMessage({"name":"NativeRuntimeMsgSend", "key": this.key, "params": JSON.stringify(this.sendArgus)})
+        window.webkit.messageHandlers.toNative.postMessage({"name":this.cmd, "key": this.key, "params": JSON.stringify(this.sendArgus)})
       }
     }
   }
@@ -1298,17 +1299,22 @@
   window.messageBridgePromise = {}
 
   window.writeInitInfos = function(name, key, res) {
-    console.log("writeInitInfos input", name, key)
+    console.log("writeInitInfos input", name, key, res)
 
     let params = null
     if (res && typeof res == "string"){
       params = JSON.parse(res)
+    }else{
+      params = res
     }
-
-    if(name == "NativeRuntimeMsgSend") {
+    if(name == "NativeRuntimeMsgSend" 
+    || name == "NativeStorageSet"
+    || name == "NativeStorageGet"
+    || name == "NativeConnectPost"
+    ) {
       console.log("runtime.onMessage: back",  typeof window.messageBridgePromise[key])
       let msgObj = window.messageBridgePromise[key]
-      if ( msgObj.constructor.name == "NativeSendObject" ) {
+      if ( msgObj && msgObj.constructor.name == "NativeSendObject" ) {
         if (params != null){
           msgObj.callback(params)
         }else{
@@ -1317,11 +1323,10 @@
         delete window.messageBridgePromise[key]
       }
     }
-
-    for (const key in window.messageBridgePromise) {
-      if (key.startsWith("runtime-")) {
-        let listener = window.messageBridgePromise[key]
-        console.log(`runtime.onMessage: onmessage ${key}: ${listener}`);
+    for (const pairKey in window.messageBridgePromise) {
+      if (name == "NativeRuntimeMsgSend" && pairKey.startsWith("runtime-")) {
+        let listener = window.messageBridgePromise[pairKey]
+        console.log(`runtime.onMessage: onmessage ${pairKey}: ${listener}`);
         if (listener && typeof listener == "function") {
           listener(params, {
             id: globalThis.localMsgDict.id
@@ -1333,10 +1338,30 @@
             })
           })
         }
+      } else if (name == "NativeStorageSet" && pairKey.startsWith("storage-")) {
+        let listener = window.messageBridgePromise[pairKey]
+        console.log(`storage.onMessage: onmessage ${pairKey}: ${listener}`);
+        if (listener && typeof listener == "function") {
+          listener(params, {
+            id: globalThis.localMsgDict.id
+          }, () => {
+            let newKey = md5(arguments.toString()+Date.now().toString()+key);
+            nativeSendMessage("RuntimeMsgResponse", newKey, {
+              respKey: key,
+              argus: arguments
+            })
+          })
+        }
+      } else if (name == "NativeConnectPost" && pairKey.startsWith("connect-")) {
+        let listener = window.messageBridgePromise[pairKey]
+        console.log(`connect.onMessage: ${pairKey}: ${listener}`);
+        if (listener && typeof listener == "function") {
+          listener(params)
+        }
       }
     }
   }
-  
+
   // sendMessage("getManifest")
 
   console.log("type: ", typeof globalThis.chrome)
@@ -1353,6 +1378,40 @@
     console.log("chrome.runtime.getURL: "+path)
     return path
   }
+  globalThis.chrome.runtime.connect = function () {
+    return {
+      name: "translateCard",
+      postMessage: (param) => {
+        console.log("runtime.connect.postMessage: ", param)
+        return new Promise((resolve, reject) => {
+          let obj = new NativeSendObject((resp) => {
+            resolve(resp)
+          }, param, "NativeConnectPost")
+          window.messageBridgePromise[obj.key] = obj
+        });
+      },
+      disconnect: () => {},
+      onDisconnect: {
+        addListener:  (listener) => {
+          console.log("runtime.onDisconnect.onMessage: add", listener)
+        }, 
+        removeListener:  (listener) => {
+          console.log("runtime.onDisconnect.onMessage: remove", listener)
+        }, 
+      },
+      onMessage: {
+        addListener:  (listener) => {
+          console.log("runtime.connect.onMessage: add", listener)
+          window.messageBridgePromise["connect-"+md5(listener.toString())] = listener
+        }, 
+        removeListener:  (listener) => {
+          console.log("runtime.connect.onMessage: remove", listener)
+          // window.messageBridge.push(listener)
+          delete window.messageBridgePromise["connect-"+md5(listener.toString())]
+        }, 
+      }
+    }
+  }
   globalThis.chrome.runtime.onMessage = {
     addListener:  (listener) => {
       console.log("runtime.onMessage: add", listener)
@@ -1367,10 +1426,11 @@
 
   globalThis.chrome.runtime.sendMessage = function () {
     console.log("runtime.sendMessage: ", arguments)
+    let argus = arguments
     return new Promise((resolve, reject) => {
       let obj = new NativeSendObject((resp) => {
         resolve(resp)
-      }, arguments)
+      }, argus)
       window.messageBridgePromise[obj.key] = obj
     });
   }
@@ -1378,34 +1438,42 @@
   
   globalThis.chrome.storage = {
     local: {
-      get: function (obj) {
-        console.log("chrome.storage.get: ", obj)
+      get: function (param) {
+        console.log("chrome.storage.get: ", param)
         return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            var res = {}
-            for (const prop in obj) {
-              if (Object.hasOwn(obj, prop)) {
-                console.log("chrome.storage.get key: ", prop, obj[prop])
-                if (prop == "guardChatgptTabId") {
-                  res["guardChatgptTabId"] = 0
-                } else if(prop == "theme") {
-                  res["theme"] = "light"
-                }else{
-                  res[prop] = obj[prop]
-                }
+          var res = {}
+          for (const prop in param) {
+            if (Object.hasOwn(param, prop)) {
+              console.log("chrome.storage.get key: ", prop, param[prop])
+              if (prop == "guardChatgptTabId") {
+                res["guardChatgptTabId"] = 0
+
+                resolve(res);
+                return;
+              // } else if(prop == "theme") {
+              //   res["theme"] = "light"
+              // }else{
+
               }
             }
-            console.log("chrome.storage.get resp: ", res)
-            resolve(res);
-          }, 300);
+          }
+
+          // res[prop] = obj[prop]
+          let obj = new NativeSendObject((resp) => {
+            resolve(resp)
+          }, param, "NativeStorageGet")
+          window.messageBridgePromise[obj.key] = obj
+        
         });
       },
-      set: function (obj) {
-        console.log("chrome.storage.set: ", obj)
+      set: function (params) {
+        console.log("chrome.storage.set: ", params)
+        // let argus = arguments
         return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            resolve(obj);
-          }, 300);
+          let obj = new NativeSendObject((resp) => {
+            resolve(resp)
+          }, params, "NativeStorageSet")
+          window.messageBridgePromise[obj.key] = obj
         });
       },
       onChanged: {
@@ -1420,36 +1488,36 @@
         }
         
       }
-    },
-    session: {
-      get: function (obj) {
-        console.log("chrome.session.get: ", obj)
-        return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            resolve(obj);
-          }, 300);
-        });
-      },
-      set: function (obj) {
-        console.log("chrome.session.set: ", obj)
-        return new Promise((resolve, reject) => {
-          setTimeout(() => {
-            resolve(obj);
-          }, 300);
-        });
-      },
-      onChange: {
-        removeListener:  (listener) => {
-          console.log("storage.session.onChanged: remove", listener)
-          delete window.messageBridgePromise["session-"+md5(listener.toString())]
-        },
-
-        addListener: (listener) => {
-          console.log("storage.session.onChanged", listener)
-          window.messageBridgePromise["session-"+md5(listener.toString())] = listener
-        }
-      }
     }
+    // session: {
+    //   get: function (obj) {
+    //     console.log("chrome.session.get: ", obj)
+    //     return new Promise((resolve, reject) => {
+    //       setTimeout(() => {
+    //         resolve(obj);
+    //       }, 300);
+    //     });
+    //   },
+    //   set: function (obj) {
+    //     console.log("chrome.session.set: ", obj)
+    //     return new Promise((resolve, reject) => {
+    //       setTimeout(() => {
+    //         resolve(obj);
+    //       }, 300);
+    //     });
+    //   },
+    //   onChange: {
+    //     removeListener:  (listener) => {
+    //       console.log("storage.session.onChanged: remove", listener)
+    //       delete window.messageBridgePromise["session-"+md5(listener.toString())]
+    //     },
+
+    //     addListener: (listener) => {
+    //       console.log("storage.session.onChanged", listener)
+    //       window.messageBridgePromise["session-"+md5(listener.toString())] = listener
+    //     }
+    //   }
+    // }
   }
   
   module.exports = globalThis.chrome
