@@ -1290,6 +1290,22 @@
     }
   }
 
+  // class NativePersistentSendObject {
+  //   constructor(callback, params, cmd) {
+  //     this.sendArgus = params;
+  //     this.key = "NativePersistentSendObject"//md5(params.toString()+Date.now().toString());
+  //     this.callback = callback
+  //     this.cmd = cmd || "NativePersistentSendObject"
+  //     this.promiseResolve()
+  //   }
+
+  //   promiseResolve(){
+  //     if( window.webkit && window.webkit.messageHandlers ){
+  //       window.webkit.messageHandlers.toNative.postMessage({"name":this.cmd, "key": this.key, "params": JSON.stringify(this.sendArgus)})
+  //     }
+  //   }
+  // }
+
   function nativeSendMessage(name, key, params) {
     if( window.webkit && window.webkit.messageHandlers ){
       window.webkit.messageHandlers.toNative.postMessage({"name":name, "key": key, "params":JSON.stringify(params)})
@@ -1326,7 +1342,7 @@
     for (const pairKey in window.messageBridgePromise) {
       if (name == "NativeRuntimeMsgSend" && pairKey.startsWith("runtime-")) {
         let listener = window.messageBridgePromise[pairKey]
-        console.log(`runtime.onMessage: onmessage ${pairKey}: ${listener}`);
+        // console.log(`runtime.onMessage: onmessage ${pairKey}: ${listener}`);
         if (listener && typeof listener == "function") {
           listener(params, {
             id: globalThis.localMsgDict.id
@@ -1337,6 +1353,12 @@
               argus: arguments
             })
           })
+        }
+      } else if (name == "NativeRuntimeMsgSend" && pairKey.startsWith("persistent-")) {
+        let listener = window.messageBridgePromise[pairKey]
+        console.log(`runtime.onMessage: onpersistent ${pairKey}: ${listener}`);
+        if (listener && typeof listener == "function") {
+          listener(params)
         }
       } else if (name == "NativeStorageSet" && pairKey.startsWith("storage-")) {
         let listener = window.messageBridgePromise[pairKey]
@@ -1375,7 +1397,6 @@
     return globalThis.localMsgDict["getManifest"]
   }
   globalThis.chrome.runtime.getURL = function (path) {
-    console.log("chrome.runtime.getURL: "+path)
     return path
   }
   globalThis.chrome.runtime.connect = function () {
@@ -1413,14 +1434,21 @@
     }
   }
   globalThis.chrome.runtime.onMessage = {
-    addListener:  (listener) => {
+    addListener:  (listener, isPersistent) => {
       console.log("runtime.onMessage: add", listener)
-      window.messageBridgePromise["runtime-"+md5(listener.toString())] = listener
+      if (isPersistent == true) {
+        window.messageBridgePromise["persistent-"+md5(listener.toString())] = listener
+      }else{
+        window.messageBridgePromise["runtime-"+md5(listener.toString())] = listener
+      }
     }, 
-    removeListener:  (listener) => {
+    removeListener:  (listener, isPersistent) => {
       console.log("runtime.onMessage: remove", listener)
-      // window.messageBridge.push(listener)
-      delete window.messageBridgePromise["runtime-"+md5(listener.toString())]
+      if (isPersistent == true) {
+        delete window.messageBridgePromise["persistent-"+md5(listener.toString())]
+      }else{
+        delete window.messageBridgePromise["runtime-"+md5(listener.toString())]
+      }
     }, 
   }
 
@@ -1434,6 +1462,17 @@
       window.messageBridgePromise[obj.key] = obj
     });
   }
+
+  // globalThis.chrome.runtime.sendPersistentMessage = function () {
+  //   console.log("runtime.sendMessage: ", arguments)
+  //   let argus = arguments
+  //   return new Promise((resolve, reject) => {
+  //     let obj = new NativePersistentSendObject((resp) => {
+  //       resolve(resp)
+  //     }, argus)
+  //     window.messageBridgePromise[obj.key] = obj
+  //   });
+  // }
   
   
   globalThis.chrome.storage = {
@@ -1453,12 +1492,10 @@
               // } else if(prop == "theme") {
               //   res["theme"] = "light"
               // }else{
-
               }
             }
           }
 
-          // res[prop] = obj[prop]
           let obj = new NativeSendObject((resp) => {
             resolve(resp)
           }, param, "NativeStorageGet")
